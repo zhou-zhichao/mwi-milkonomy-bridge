@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         MWI → Milkonomy 角色数据导出
+// @name         MWI → Milkonomy Bridge
 // @namespace    https://github.com/user/mwi-milkonomy-bridge
-// @version      1.4.0
-// @description  自动从 Milky Way Idle 读取角色数据，生成 Milkonomy 可导入的 JSON
+// @version      2.0.0
+// @description  自动从 MWI 捕获角色数据和实时市场价格，同步到 Milkonomy
 // @author       You
 // @match        *://www.milkywayidle.com/*
 // @match        *://test.milkywayidle.com/*
@@ -15,8 +15,10 @@
 (function () {
   "use strict";
 
-  console.log("[MWI-Milkonomy] ====== v1.4.0 脚本已加载 ======");
-  console.log("[MWI-Milkonomy] URL:", window.location.href);
+  var VERSION = "2.0.0";
+  var MILKONOMY_RECEIVER = "https://milkonomy.pages.dev/market-receiver.html";
+
+  console.log("[MWI-Milkonomy] ====== v" + VERSION + " 脚本已加载 ======");
 
   var MILKONOMY_ACTIONS = [
     "milking", "foraging", "woodcutting",
@@ -56,8 +58,80 @@
   };
 
   var characterData = null;
+  var marketItemCount = 0;
 
-  // === WebSocket Hook（@grant none 时直接在页面上下文运行，无沙箱） ===
+  // === Milkonomy iframe 同步 ===
+  var milkonomyFrame = null;
+  var frameReady = false;
+  var pendingUpdates = [];
+
+  function initMilkonomyFrame() {
+    milkonomyFrame = document.createElement("iframe");
+    milkonomyFrame.src = MILKONOMY_RECEIVER;
+    milkonomyFrame.style.cssText = "display:none;";
+    document.body.appendChild(milkonomyFrame);
+
+    milkonomyFrame.onload = function() {
+      frameReady = true;
+      console.log("[MWI-Milkonomy] ✓ Milkonomy 同步通道已建立");
+      // 发送积压的更新
+      for (var i = 0; i < pendingUpdates.length; i++) {
+        sendToMilkonomy(pendingUpdates[i]);
+      }
+      pendingUpdates = [];
+    };
+
+    window.addEventListener("message", function(e) {
+      if (e.data && e.data.type === "mwi-market-ack") {
+        console.log("[MWI-Milkonomy] ✓ 已同步 " + e.data.count + " 个物品价格到 Milkonomy");
+      }
+    });
+  }
+
+  function sendToMilkonomy(items) {
+    if (!frameReady || !milkonomyFrame) {
+      pendingUpdates.push(items);
+      return;
+    }
+    milkonomyFrame.contentWindow.postMessage({
+      type: "mwi-market-update",
+      timestamp: Math.floor(Date.now() / 1000),
+      items: items
+    }, "https://milkonomy.pages.dev");
+  }
+
+  // === 市场数据处理 ===
+  function processMarketData(books) {
+    if (!books || !books.itemHrid || !books.orderBooks) return;
+    var hrid = books.itemHrid;
+    var orderBooks = books.orderBooks;
+    var itemData = {};
+
+    for (var i = 0; i < orderBooks.length; i++) {
+      var asks = orderBooks[i].asks || [];
+      var bids = orderBooks[i].bids || [];
+      if (asks.length === 0 && bids.length === 0) continue;
+      var bestAsk = asks.length > 0 ? asks[0].price : -1;
+      var bestBid = bids.length > 0 ? bids[0].price : -1;
+      itemData[String(i)] = { ask: bestAsk, bid: bestBid };
+    }
+
+    if (Object.keys(itemData).length > 0) {
+      marketItemCount++;
+      updateMarketStatus();
+      // 实时推送到 Milkonomy
+      var update = {};
+      update[hrid] = itemData;
+      sendToMilkonomy(update);
+    }
+  }
+
+  function updateMarketStatus() {
+    var el = document.getElementById("mwi-milkonomy-market-count");
+    if (el) el.textContent = marketItemCount;
+  }
+
+  // === WebSocket Hook ===
   var dataProperty = Object.getOwnPropertyDescriptor(MessageEvent.prototype, "data");
   if (!dataProperty || !dataProperty.get) {
     console.error("[MWI-Milkonomy] 无法 hook MessageEvent.prototype.data");
@@ -73,12 +147,15 @@
       Object.defineProperty(this, "data", { value: message });
 
       try {
-        if (typeof message === "string" && message.indexOf("init_character_data") > -1) {
+        if (typeof message === "string") {
           var msg = JSON.parse(message);
+          if (msg.type === "market_item_order_books_updated") {
+            processMarketData(msg.marketItemOrderBooks);
+          }
           if (msg.type === "init_character_data") {
             characterData = msg;
             console.log("[MWI-Milkonomy] ✓ 捕获角色数据:", msg.character ? msg.character.name : "?");
-            showExportButton();
+            showPanel();
           }
         }
       } catch (e) {
@@ -91,7 +168,7 @@
     console.log("[MWI-Milkonomy] ✓ WebSocket hook OK");
   }
 
-  // === 数据转换 ===
+  // === 角色数据转换 ===
   function buildPreset() {
     if (!characterData) return null;
     var d = characterData;
@@ -178,16 +255,20 @@
   }
 
   // === UI ===
-  function showExportButton() {
+  function showPanel() {
     if (document.getElementById("mwi-milkonomy-panel")) return;
+
+    // 初始化 Milkonomy 同步通道
+    initMilkonomyFrame();
+
     var panel = document.createElement("div");
     panel.id = "mwi-milkonomy-panel";
-    panel.style.cssText = "position:fixed;bottom:16px;right:16px;z-index:99999;display:flex;gap:8px;";
+    panel.style.cssText = "position:fixed;bottom:16px;right:16px;z-index:99999;display:flex;gap:8px;align-items:center;";
 
     var btnCSS = "padding:8px 14px;color:white;border:none;border-radius:6px;font-size:13px;font-weight:bold;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.3);";
 
     var exportBtn = document.createElement("button");
-    exportBtn.textContent = "\uD83D\uDCCB \u5BFC\u51FA\u5230 Milkonomy";
+    exportBtn.textContent = "\uD83D\uDCCB \u5BFC\u51FA\u89D2\u8272";
     exportBtn.style.cssText = btnCSS + "background:#16ab1b;";
     exportBtn.onclick = function() {
       var preset = buildPreset();
@@ -196,43 +277,18 @@
       navigator.clipboard.writeText(json).then(function() {
         showToast("\u2713 \u5DF2\u590D\u5236\uFF01\u6253\u5F00 Milkonomy \u2192 \u9884\u8BBE \u2192 \u5BFC\u5165 \u2192 \u7C98\u8D34");
       }).catch(function() {
-        // fallback: show in prompt for manual copy
         window.prompt("\u590D\u5236\u4EE5\u4E0B JSON:", json);
       });
     };
 
-    var infoBtn = document.createElement("button");
-    infoBtn.textContent = "\u2139\uFE0F \u67E5\u770B\u6570\u636E";
-    infoBtn.style.cssText = btnCSS + "background:#409eff;";
-    infoBtn.onclick = function() {
-      if (!characterData) { alert("\u65E0\u6570\u636E"); return; }
-      var skills = characterData.characterSkills || [];
-      var buffs = characterData.communityBuffs || [];
-      var house = characterData.characterHouseRoomMap || {};
-      var info = "\u89D2\u8272: " + (characterData.character ? characterData.character.name : "?") + "\n\n=== \u6280\u80FD ===\n";
-      for (var i = 0; i < skills.length; i++) {
-        var a = SKILL_TO_ACTION[skills[i].skillHrid];
-        if (a) info += "  " + a + ": Lv." + skills[i].level + "\n";
-      }
-      info += "\n=== \u623F\u5C4B ===\n";
-      var he = Object.entries(house);
-      for (var h = 0; h < he.length; h++) {
-        var ha = HOUSE_ROOM_TO_ACTION[he[h][0]];
-        if (ha && he[h][1]) info += "  " + ha + ": Lv." + (he[h][1].level||0) + "\n";
-      }
-      if (he.length === 0) info += "  (\u65E0)\n";
-      info += "\n=== \u793E\u533ABuff ===\n";
-      for (var b = 0; b < buffs.length; b++) {
-        var t = COMMUNITY_BUFF_MAP[buffs[b].hrid];
-        if (t) info += "  " + t + ": Lv." + buffs[b].level + "\n";
-      }
-      alert(info);
-    };
+    var statusEl = document.createElement("span");
+    statusEl.style.cssText = "padding:6px 12px;background:rgba(0,0,0,0.6);color:#e6a23c;border-radius:6px;font-size:12px;font-weight:bold;";
+    statusEl.innerHTML = "\uD83D\uDCCA \u5E02\u573A\u540C\u6B65: <span id='mwi-milkonomy-market-count'>0</span> \u4E2A\u7269\u54C1";
 
     panel.appendChild(exportBtn);
-    panel.appendChild(infoBtn);
+    panel.appendChild(statusEl);
     document.body.appendChild(panel);
-    console.log("[MWI-Milkonomy] \u2713 \u6309\u94AE\u5DF2\u663E\u793A");
+    console.log("[MWI-Milkonomy] \u2713 \u9762\u677F\u5DF2\u663E\u793A");
   }
 
   function showToast(msg) {
