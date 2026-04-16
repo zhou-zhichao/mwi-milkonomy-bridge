@@ -1,0 +1,13 @@
+.env
+*.log
+.mwi-last-run
+.mwi-optimize-last-run
+mwi-unknown-state.png
+mwi-tab-fail*.png
+mwi-tab-fail*.txt
+nohup.out
+__pycache__/
+.claude/
+.context/
+~/
+logs/

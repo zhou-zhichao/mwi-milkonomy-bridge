@@ -15,10 +15,20 @@
 (function () {
   "use strict";
 
-  var VERSION = "2.0.0";
-  var MILKONOMY_RECEIVER = "https://milkonomy.pages.dev/market-receiver.html";
+  var VERSION = "2.1.0";
+  var MILKONOMY_PROD = "https://milkonomy.pages.dev/market-receiver.html";
+  var MILKONOMY_LOCAL = "http://localhost:8889/market-receiver.html";
+  var MILKONOMY_RECEIVER = MILKONOMY_PROD;
 
   console.log("[MWI-Milkonomy] ====== v" + VERSION + " 脚本已加载 ======");
+
+  // 自动探测本地 Milkonomy 实例
+  fetch(MILKONOMY_LOCAL, { mode: "no-cors" }).then(function() {
+    MILKONOMY_RECEIVER = MILKONOMY_LOCAL;
+    console.log("[MWI-Milkonomy] ✓ 检测到本地实例，使用 localhost:8889");
+  }).catch(function() {
+    console.log("[MWI-Milkonomy] 使用生产环境 milkonomy.pages.dev");
+  });
 
   var MILKONOMY_ACTIONS = [
     "milking", "foraging", "woodcutting",
@@ -93,11 +103,12 @@
       pendingUpdates.push(items);
       return;
     }
+    var receiverOrigin = new URL(MILKONOMY_RECEIVER).origin;
     milkonomyFrame.contentWindow.postMessage({
       type: "mwi-market-update",
       timestamp: Math.floor(Date.now() / 1000),
       items: items
-    }, "https://milkonomy.pages.dev");
+    }, receiverOrigin);
   }
 
   // === 市场数据处理 ===
