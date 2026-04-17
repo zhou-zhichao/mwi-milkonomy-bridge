@@ -31,6 +31,16 @@ MAX_RANDOM_DELAY=${MAX_RANDOM_DELAY:-$((30 * 60))} # 启动前随机等待 0~30 
 
 # 自动卖出配置
 SELL_RESERVE=${SELL_RESERVE:-50000000}   # 保留 50M 货值, 超出部分卖出
+SELL_FRACTION=${SELL_FRACTION:-0.2}      # 每次只卖溢出部分的 20% (防砸盘)
+
+# 挂牌配置 (v2: 挂 ask / bid 单而非直接吃单)
+MAX_LISTINGS=${MAX_LISTINGS:-23}         # 游戏最大挂牌数
+LISTING_RESERVE_SLOTS=${LISTING_RESERVE_SLOTS:-0}  # 预留几个槽不用 (默认 0 = 全部可用)
+
+# 材料补货配置 (v2: 瞬间 9h + 挂 9h = 18h 总覆盖)
+MATERIAL_INSTANT_HOURS=${MATERIAL_INSTANT_HOURS:-9}   # 瞬间买到的目标小时数
+MATERIAL_LISTING_HOURS=${MATERIAL_LISTING_HOURS:-9}   # 挂 buy 单的目标小时数
+MATERIAL_TRIGGER_HOURS=${MATERIAL_TRIGGER_HOURS:-18}  # 总覆盖低于此值触发补货
 
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE"
@@ -452,6 +462,7 @@ NAVEOF
         return 1
     fi
     human_sleep 2 3
+    ensure_market_listings_tab
 
     # 2. 搜索物品
     local filter_ref
@@ -582,6 +593,7 @@ NAVEOF
         return 1
     fi
     human_sleep 2 3
+    ensure_market_listings_tab
 
     # 2. 搜索物品
     local filter_ref
@@ -691,6 +703,478 @@ else: print(0)
     "$AB" --cdp "$CDP_PORT" click "@$post_ref" 2>/dev/null || true
     human_sleep 2 3
     log "  ✓ 已下单卖出 $quantity 个 $item_name"
+    return 0
+}
+
+# ============================================================================
+# Marketplace Listing 辅助函数 (v2: 挂 ask / bid 单)
+# ============================================================================
+
+# 确保当前在 Market Listings tab (不是 My Listings)
+# 因为 collect/read_my_listings 会切到 My Listings, 这里要切回来
+ensure_market_listings_tab() {
+    local snap tab_ref
+    snap=$("$AB" --cdp "$CDP_PORT" snapshot -i 2>/dev/null || true)
+    tab_ref=$(echo "$snap" | grep -F 'tab "Market Listings"' | grep -v 'selected' | head -1 | grep -oP 'ref=\Ke\d+' || true)
+    if [[ -n "$tab_ref" ]]; then
+        "$AB" --cdp "$CDP_PORT" click "@$tab_ref" 2>/dev/null || true
+        human_sleep 1 2
+    fi
+}
+
+# 鲁棒地关闭当前打开的市场挂单/确认等模态对话框
+# .click() 对 React 的 div 关闭按钮经常无效, 必须派发完整的 pointer/mouse 事件序列
+close_marketplace_modal() {
+    "$AB" --cdp "$CDP_PORT" eval --stdin <<'CLOSEEOF' 2>/dev/null || true
+(function(){
+  var modal = document.querySelector('[class*="Modal_modal__"]');
+  if (!modal) return 'NO_MODAL';
+  var closeBtn = Array.from(modal.querySelectorAll('div')).find(function(d){
+    var c = typeof d.className === 'string' ? d.className : '';
+    return c.indexOf('Modal_closeButton') === 0 || c.indexOf(' Modal_closeButton') >= 0;
+  });
+  if (!closeBtn) return 'NO_CLOSE';
+  var rect = closeBtn.getBoundingClientRect();
+  ['mouseenter','mouseover','mousedown','pointerdown','pointerup','mouseup','click'].forEach(function(t){
+    var ctor = t.indexOf('pointer') === 0 ? PointerEvent : MouseEvent;
+    try { closeBtn.dispatchEvent(new ctor(t, { bubbles: true, cancelable: true, view: window, clientX: rect.x + rect.width/2, clientY: rect.y + rect.height/2 })); } catch(e){}
+  });
+  return document.querySelector('[class*="Modal_modal__"]') ? 'STILL_OPEN' : 'CLOSED';
+})()
+CLOSEEOF
+}
+
+# 导航到 Marketplace tab
+navigate_to_marketplace() {
+    local r
+    r=$("$AB" --cdp "$CDP_PORT" eval --stdin <<'NAVEOF' 2>/dev/null || true
+(function() {
+  var labels = Array.from(document.querySelectorAll('[class*="NavigationBar_label"]'));
+  var label = labels.find(function(l) { return (l.textContent || "").trim() === "Marketplace"; });
+  if (!label) return "NO_LABEL";
+  label.closest('[class*="NavigationBar_navigationLink"]').click();
+  return "OK";
+})()
+NAVEOF
+)
+    [[ "$r" == *OK* ]] || return 1
+    human_sleep 1 2
+    return 0
+}
+
+# 在 Market Listings tab 搜索并打开指定物品的订单簿, 返回成功/失败
+# 用法: open_item_in_marketplace "Holy Cheese"
+open_item_in_marketplace() {
+    local item_name="$1"
+    local b64
+    b64=$(printf '%s' "$item_name" | base64 -w0)
+
+    # 先确保在 Market Listings tab (不是 My Listings)
+    local snap tab_ref
+    snap=$("$AB" --cdp "$CDP_PORT" snapshot -i 2>/dev/null || true)
+    tab_ref=$(echo "$snap" | grep -F 'tab "Market Listings"' | grep -v 'selected' | head -1 | grep -oP 'ref=\Ke\d+' || true)
+    if [[ -n "$tab_ref" ]]; then
+        "$AB" --cdp "$CDP_PORT" click "@$tab_ref" 2>/dev/null || true
+        human_sleep 1 2
+        snap=$("$AB" --cdp "$CDP_PORT" snapshot -i 2>/dev/null || true)
+    fi
+
+    # 搜索物品
+    local filter_ref
+    filter_ref=$(echo "$snap" | grep -F 'searchbox "Item Filter"' | head -1 | grep -oP 'ref=\Ke\d+' || true)
+    if [[ -z "$filter_ref" ]]; then
+        log "    ✗ 找不到搜索框"
+        return 1
+    fi
+    "$AB" --cdp "$CDP_PORT" fill "@$filter_ref" "$item_name" 2>/dev/null || true
+    human_sleep 1 2
+
+    # 点击物品卡片 (限定在 MarketplacePanel 内)
+    local r
+    r=$("$AB" --cdp "$CDP_PORT" eval -b "$(printf '%s' '(function(){var b64="'"$b64"'";var name=atob(b64);var svgs=Array.from(document.querySelectorAll("svg[aria-label]"));var match=svgs.find(function(s){if(s.getAttribute("aria-label")!==name)return false;var el=s;while(el){if(el.className&&typeof el.className==="string"&&el.className.indexOf("MarketplacePanel")>=0)return true;el=el.parentElement;}return false;});if(!match)return "NOT_FOUND";var clickable=match.closest("[class*=Item_clickable],[class*=Item_item]");if(!clickable)return "NO_CLICKABLE";clickable.click();return "OK";})()' | base64 -w0)" 2>/dev/null || true)
+    if [[ "$r" != *OK* ]]; then
+        log "    ✗ 市场中找不到 $item_name ($r)"
+        return 1
+    fi
+    human_sleep 2 3
+
+    # 等订单簿加载 (等到 "+ New Sell Listing" 按钮出现)
+    local attempts=10 ready=""
+    while (( attempts-- > 0 )); do
+        snap=$("$AB" --cdp "$CDP_PORT" snapshot -i 2>/dev/null || true)
+        if echo "$snap" | grep -q '"+ New Sell Listing"'; then
+            ready=1
+            break
+        fi
+        if echo "$snap" | grep -q 'button "Refresh"'; then
+            local refresh_ref
+            refresh_ref=$(echo "$snap" | grep 'button "Refresh"' | head -1 | grep -oP 'ref=\Ke\d+' || true)
+            [[ -n "$refresh_ref" ]] && "$AB" --cdp "$CDP_PORT" click "@$refresh_ref" 2>/dev/null || true
+        fi
+        sleep 2
+    done
+    if [[ -z "$ready" ]]; then
+        log "    ✗ 订单簿加载超时"
+        return 1
+    fi
+    return 0
+}
+
+# 读订单簿的 best ask (最低卖价) 和 best bid (最高买价)
+# 输出格式: "best_ask best_bid" (两个数字, 空格分隔; 缺失用 0)
+get_order_book_top() {
+    "$AB" --cdp "$CDP_PORT" eval --stdin <<'BOOKEOF' 2>/dev/null || echo "0 0"
+(function(){
+  var tables = Array.from(document.querySelectorAll('table'));
+  var parsePrice = function(t){ return parseInt((t||'').replace(/[^\d]/g,'')) || 0; };
+  var ask = 0, bid = 0;
+  tables.forEach(function(t){
+    var h = (t.querySelector('thead, tr') || {textContent:''}).textContent || '';
+    if (h.indexOf('Ask Price') >= 0) {
+      var row = t.querySelector('tbody tr') || t.querySelectorAll('tr')[1];
+      if (row) {
+        var cells = row.querySelectorAll('td');
+        if (cells.length >= 2) ask = parsePrice(cells[1].textContent);
+      }
+    } else if (h.indexOf('Bid Price') >= 0) {
+      var row = t.querySelector('tbody tr') || t.querySelectorAll('tr')[1];
+      if (row) {
+        var cells = row.querySelectorAll('td');
+        if (cells.length >= 2) bid = parsePrice(cells[1].textContent);
+      }
+    }
+  });
+  return ask + ' ' + bid;
+})()
+BOOKEOF
+}
+
+# 切到 My Listings tab; 读取所有挂牌, 返回 JSON
+# 格式: {"used": 3, "max": 23, "collectable": 0, "listings": [{item, type, filled, total, price}, ...]}
+read_my_listings() {
+    # 切到 My Listings tab
+    local snap tab_ref
+    snap=$("$AB" --cdp "$CDP_PORT" snapshot -i 2>/dev/null || true)
+    tab_ref=$(echo "$snap" | grep -P 'tab "My Listings' | grep -v 'selected' | head -1 | grep -oP 'ref=\Ke\d+' || true)
+    if [[ -n "$tab_ref" ]]; then
+        "$AB" --cdp "$CDP_PORT" click "@$tab_ref" 2>/dev/null || true
+        human_sleep 1 2
+    fi
+
+    "$AB" --cdp "$CDP_PORT" eval --stdin <<'LISTEOF' 2>/dev/null || echo '{"used":0,"max":23,"collectable":0,"listings":[]}'
+(function(){
+  var counter = Array.from(document.querySelectorAll('div')).find(function(d){
+    return typeof d.className === 'string' && d.className.indexOf('MarketplacePanel_listingCount') >= 0;
+  });
+  var used = 0, max = 23;
+  if (counter) {
+    var m = counter.textContent.match(/(\d+)\s*\/\s*(\d+)\s*Listings/);
+    if (m) { used = parseInt(m[1]); max = parseInt(m[2]); }
+  }
+  var collectBtn = Array.from(document.querySelectorAll('button')).find(function(b){
+    return (b.textContent||'').indexOf('Collect All') >= 0;
+  });
+  var collectable = 0;
+  if (collectBtn) {
+    var cm = collectBtn.textContent.match(/\((\d+)\)/);
+    if (cm) collectable = parseInt(cm[1]);
+  }
+  var tables = Array.from(document.querySelectorAll('table'));
+  var myTable = tables.find(function(t){
+    var h = (t.querySelector('thead, tr')||{textContent:''}).textContent || '';
+    return h.indexOf('Status') >= 0 && h.indexOf('Progress') >= 0;
+  });
+  var listings = [];
+  if (myTable) {
+    var rows = Array.from(myTable.querySelectorAll('tbody tr'));
+    rows.forEach(function(r){
+      var svg = r.querySelector('svg[aria-label]');
+      var cells = Array.from(r.querySelectorAll('td'));
+      if (cells.length >= 4) {
+        var prog = cells[2].textContent.trim();
+        var pm = prog.match(/([\d,\.KMB]+)\s*\/\s*([\d,\.KMB]+)/);
+        var parseQty = function(s){
+          s = (s||'').replace(/,/g,'');
+          if (/K$/.test(s)) return Math.floor(parseFloat(s)*1000);
+          if (/M$/.test(s)) return Math.floor(parseFloat(s)*1000000);
+          if (/B$/.test(s)) return Math.floor(parseFloat(s)*1000000000);
+          return parseInt(s) || 0;
+        };
+        listings.push({
+          item: svg ? svg.getAttribute('aria-label') : null,
+          status: cells[0].textContent.trim(),
+          type: cells[1].textContent.trim(),
+          filled: pm ? parseQty(pm[1]) : 0,
+          total: pm ? parseQty(pm[2]) : 0,
+          price: parseInt(cells[3].textContent.replace(/[^\d]/g,'')) || 0
+        });
+      }
+    });
+  }
+  return JSON.stringify({used: used, max: max, collectable: collectable, listings: listings});
+})()
+LISTEOF
+}
+
+# 收菜: 如果 Collect All (N) 的 N > 0, 就点一下把所有已成交的订单收回来
+collect_all_listings() {
+    log "=== 收菜检查 ==="
+    navigate_to_marketplace || { log "  ✗ 无法进入市场"; return 1; }
+
+    local listings_json
+    listings_json=$(read_my_listings)
+    # 去掉外层引号 + 反转义 (agent-browser eval 会 JSON 编码字符串返回)
+    listings_json="${listings_json#\"}"
+    listings_json="${listings_json%\"}"
+    listings_json=$(echo "$listings_json" | sed 's/\\"/"/g; s/\\\\/\\/g')
+
+    local collectable
+    collectable=$(echo "$listings_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('collectable', 0))" 2>/dev/null || echo "0")
+
+    if [[ "$collectable" == "0" ]] || [[ -z "$collectable" ]]; then
+        log "  暂无可收成交 (Collect All: 0)"
+        return 0
+    fi
+
+    log "  → 发现 $collectable 个已成交订单, 点 Collect All"
+    local btn_ref
+    btn_ref=$("$AB" --cdp "$CDP_PORT" snapshot -i 2>/dev/null | grep -F '"Collect All' | head -1 | grep -oP 'ref=\Ke\d+' || true)
+    if [[ -z "$btn_ref" ]]; then
+        log "  ✗ 找不到 Collect All 按钮"
+        return 1
+    fi
+    "$AB" --cdp "$CDP_PORT" click "@$btn_ref" 2>/dev/null || true
+    human_sleep 2 3
+    log "  ✓ 已收菜"
+    return 0
+}
+
+# 统计指定物品在 My Listings 里所有 Active Buy 单的剩余未成交数量
+# 输入: listings_json (来自 read_my_listings), item_name
+# 输出: 剩余总挂单量 (total - filled 之和)
+pending_buy_qty_for_item() {
+    local listings_json="$1"
+    local item_name="$2"
+    echo "$listings_json" | python3 -c "
+import sys, json
+name = '''$item_name'''
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print(0); sys.exit()
+total = 0
+for L in d.get('listings', []):
+    if L.get('type') == 'Buy' and L.get('status') == 'Active' and L.get('item') == name:
+        total += max(0, L.get('total', 0) - L.get('filled', 0))
+print(total)
+" 2>/dev/null || echo 0
+}
+
+# 点 + 直到价格 >= target, 或 - 直到价格 <= target; 最多 N 次; 返回最终价格
+# 用法: adjust_price_in_modal <target> <direction:up|down> <max_clicks>
+adjust_price_in_modal() {
+    local target="$1"
+    local direction="$2"
+    local max_clicks="${3:-15}"
+
+    "$AB" --cdp "$CDP_PORT" eval --stdin <<ADJEOF 2>/dev/null || echo "0"
+(function(){
+  var target = $target;
+  var direction = '$direction';
+  var maxClicks = $max_clicks;
+  var getPrice = function(){
+    var d = Array.from(document.querySelectorAll('div')).find(function(e){
+      return typeof e.className === 'string' && e.className.indexOf('MarketplacePanel_priceInput__') >= 0;
+    });
+    return d ? parseInt(d.textContent.replace(/,/g,'')) : null;
+  };
+  var modal = document.querySelector('[class*="Modal_modal__"]');
+  if (!modal) return '0';
+  var buttons = Array.from(modal.querySelectorAll('button'));
+  var btn = direction === 'up'
+    ? buttons.find(function(b){ return b.textContent.trim() === '+'; })
+    : buttons.find(function(b){ return b.textContent.trim() === '-'; });
+  if (!btn) return '0';
+  var last = getPrice();
+  var clicks = 0;
+  while (clicks < maxClicks) {
+    var ok = direction === 'up' ? (last >= target) : (last <= target);
+    if (ok) break;
+    btn.click();
+    var now = getPrice();
+    if (now === last) break;
+    last = now;
+    clicks++;
+  }
+  return String(last);
+})()
+ADJEOF
+}
+
+# 在 Sell/Buy Listing 模态里设置数量 (使用 React 原生 setter)
+set_listing_quantity() {
+    local qty="$1"
+    "$AB" --cdp "$CDP_PORT" eval -b "$(printf '%s' '(function(){var qty='"$qty"';var modal=document.querySelector("[class*=Modal_modal__]");if(!modal)return "no_modal";var input=modal.querySelector("input[type=number]");if(!input)return "no_input";var setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value").set;setter.call(input,String(qty));input.dispatchEvent(new Event("input",{bubbles:true}));return "ok:"+input.value;})()' | base64 -w0)" 2>/dev/null || echo "error"
+}
+
+# 派发完整事件序列点击模态里的按钮 (ref-based click 也能用, 但这里需要绕过 React 可能吞掉的 .click())
+dispatch_modal_button_click() {
+    local btn_text="$1"
+    "$AB" --cdp "$CDP_PORT" eval -b "$(printf '%s' '(function(){var text="'"$btn_text"'";var modal=document.querySelector("[class*=Modal_modal__]");if(!modal)return "no_modal";var btn=Array.from(modal.querySelectorAll("button")).find(function(b){return b.textContent.trim()===text;});if(!btn)return "no_btn";var r=btn.getBoundingClientRect();["mouseenter","mouseover","mousedown","pointerdown","pointerup","mouseup","click"].forEach(function(t){var C=t.indexOf("pointer")===0?PointerEvent:MouseEvent;try{btn.dispatchEvent(new C(t,{bubbles:true,cancelable:true,view:window,clientX:r.x+r.width/2,clientY:r.y+r.height/2}));}catch(e){}});return "ok";})()' | base64 -w0)" 2>/dev/null || echo "error"
+}
+
+# 如果弹出 "价格异常" 的 Yes/No 确认框, 点 No 取消 (我们的挂单不应该触发这种警告)
+cancel_price_confirm_if_any() {
+    local snap
+    snap=$("$AB" --cdp "$CDP_PORT" snapshot -i 2>/dev/null || true)
+    if echo "$snap" | grep -qE 'button "No"' && echo "$snap" | grep -qE 'button "Yes"'; then
+        local no_ref
+        no_ref=$(echo "$snap" | grep -F 'button "No"' | head -1 | grep -oP 'ref=\Ke\d+' || true)
+        if [[ -n "$no_ref" ]]; then
+            log "    ⚠ 检测到价格异常确认框, 取消"
+            "$AB" --cdp "$CDP_PORT" click "@$no_ref" 2>/dev/null || true
+            human_sleep 1 2
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# 挂一个 Sell listing: 价格自动取 best ask 或以上, 数量由调用方决定
+# 用法: post_sell_listing "Holy Cheese" 100
+# 返回 0: 成功; 1: 失败
+post_sell_listing() {
+    local item_name="$1"
+    local quantity="$2"
+    log "  → 挂 Sell 单: $quantity 个 $item_name"
+
+    # 1. 打开物品订单簿
+    open_item_in_marketplace "$item_name" || return 1
+
+    # 2. 读 best ask (作为挂牌目标价)
+    local book best_ask best_bid
+    book=$(get_order_book_top)
+    read -r best_ask best_bid <<< "$book"
+    if [[ -z "$best_ask" ]] || [[ "$best_ask" == "0" ]]; then
+        log "    ✗ 无法读到 best ask, 跳过挂牌"
+        return 1
+    fi
+    log "    订单簿: ask=$best_ask bid=$best_bid"
+
+    # 3. 点 + New Sell Listing
+    local snap new_sell_ref
+    snap=$("$AB" --cdp "$CDP_PORT" snapshot -i 2>/dev/null || true)
+    new_sell_ref=$(echo "$snap" | grep -F '"+ New Sell Listing"' | head -1 | grep -oP 'ref=\Ke\d+' || true)
+    if [[ -z "$new_sell_ref" ]]; then
+        log "    ✗ 找不到 + New Sell Listing 按钮"
+        return 1
+    fi
+    "$AB" --cdp "$CDP_PORT" click "@$new_sell_ref" 2>/dev/null || true
+    human_sleep 1 2
+
+    # 4. 调价到 best_ask 或以上 (默认是 best bid, 需要点 + 直到 >= best_ask)
+    local final_price
+    final_price=$(adjust_price_in_modal "$best_ask" "up" 15)
+    final_price="${final_price//\"/}"
+    if [[ -z "$final_price" ]] || [[ "$final_price" == "0" ]]; then
+        log "    ✗ 调价失败"
+        close_marketplace_modal
+        return 1
+    fi
+    log "    最终价: $final_price (目标 $best_ask)"
+
+    # 5. 设置数量
+    local r
+    r=$(set_listing_quantity "$quantity")
+    if [[ "$r" != *ok* ]]; then
+        log "    ✗ 设置数量失败: $r"
+        close_marketplace_modal
+        return 1
+    fi
+    human_sleep 1 2
+
+    # 6. 点 Post Sell Listing
+    r=$(dispatch_modal_button_click "Post Sell Listing")
+    if [[ "$r" != *ok* ]]; then
+        log "    ✗ 点 Post Sell Listing 失败: $r"
+        close_marketplace_modal
+        return 1
+    fi
+    human_sleep 2 3
+
+    # 7. 处理可能的价格异常确认框
+    cancel_price_confirm_if_any && {
+        log "    ✗ 挂牌被取消 (价格异常)"
+        return 1
+    }
+
+    log "    ✓ 已挂 Sell $quantity 个 @ $final_price"
+    return 0
+}
+
+# 挂一个 Buy listing: 价格自动取 best bid 或以下, 数量由调用方决定
+# 用法: post_buy_listing "Milk" 100
+# 返回 0: 成功; 1: 失败
+post_buy_listing() {
+    local item_name="$1"
+    local quantity="$2"
+    log "  → 挂 Buy 单: $quantity 个 $item_name"
+
+    open_item_in_marketplace "$item_name" || return 1
+
+    local book best_ask best_bid
+    book=$(get_order_book_top)
+    read -r best_ask best_bid <<< "$book"
+    if [[ -z "$best_bid" ]] || [[ "$best_bid" == "0" ]]; then
+        log "    ✗ 无法读到 best bid, 跳过挂牌"
+        return 1
+    fi
+    log "    订单簿: ask=$best_ask bid=$best_bid"
+
+    local snap new_buy_ref
+    snap=$("$AB" --cdp "$CDP_PORT" snapshot -i 2>/dev/null || true)
+    new_buy_ref=$(echo "$snap" | grep -F '"+ New Buy Listing"' | head -1 | grep -oP 'ref=\Ke\d+' || true)
+    if [[ -z "$new_buy_ref" ]]; then
+        log "    ✗ 找不到 + New Buy Listing 按钮"
+        return 1
+    fi
+    "$AB" --cdp "$CDP_PORT" click "@$new_buy_ref" 2>/dev/null || true
+    human_sleep 1 2
+
+    # 默认价 = best ask, 要点 - 直到 <= best_bid
+    local final_price
+    final_price=$(adjust_price_in_modal "$best_bid" "down" 15)
+    final_price="${final_price//\"/}"
+    if [[ -z "$final_price" ]] || [[ "$final_price" == "0" ]]; then
+        log "    ✗ 调价失败"
+        close_marketplace_modal
+        return 1
+    fi
+    log "    最终价: $final_price (目标 $best_bid)"
+
+    local r
+    r=$(set_listing_quantity "$quantity")
+    if [[ "$r" != *ok* ]]; then
+        log "    ✗ 设置数量失败: $r"
+        close_marketplace_modal
+        return 1
+    fi
+    human_sleep 1 2
+
+    r=$(dispatch_modal_button_click "Post Buy Listing")
+    if [[ "$r" != *ok* ]]; then
+        log "    ✗ 点 Post Buy Listing 失败: $r"
+        close_marketplace_modal
+        return 1
+    fi
+    human_sleep 2 3
+
+    cancel_price_confirm_if_any && {
+        log "    ✗ 挂牌被取消 (价格异常)"
+        return 1
+    }
+
+    log "    ✓ 已挂 Buy $quantity 个 @ $final_price"
     return 0
 }
 
@@ -943,20 +1427,42 @@ EVALEOF
     log "  ✓ 已切换到生产: $item_name (验证: $verify_action)"
 }
 
-# 检查材料是否够继续生产, 不够就从市场补货
+# 检查材料是否够继续生产, 不够就从市场补货 (v2: 瞬间 + 挂 buy 单)
 # 用法: replenish_if_needed "$calc_result" "$char_file"
-# 逻辑: 算每种输入材料还能生产几小时, 低于 6 小时就买到 9 小时
+# 逻辑 (仅针对当前 Top 1 的输入材料):
+#   总覆盖 = 库存 + 已挂 buy 单剩余量 (换算成小时)
+#   如果 总覆盖 < MATERIAL_TRIGGER_HOURS (默认 18h):
+#     1. 瞬间吃 ask 买到库存达 MATERIAL_INSTANT_HOURS (默认 9h)
+#     2. 挂 buy 单使已挂量达 MATERIAL_LISTING_HOURS (默认 9h, 价格 = best bid)
 replenish_if_needed() {
     local calc_result="$1"
     local char_file="$2"
     log "=== 材料补货检查 ==="
 
-    local buy_list
-    buy_list=$(echo "$calc_result" | python3 -c "
-import json, sys, math
+    # 读取当前挂牌 (先切到 My Listings)
+    navigate_to_marketplace || { log "  ✗ 无法进入市场"; return 1; }
+    local listings_json
+    listings_json=$(read_my_listings)
+    listings_json="${listings_json#\"}"
+    listings_json="${listings_json%\"}"
+    listings_json=$(echo "$listings_json" | sed 's/\\"/"/g; s/\\\\/\\/g')
 
-calc = json.load(sys.stdin)
-with open('$char_file') as f:
+    # 算每种材料的状态 (calc_result/listings/char 通过 env + stdin 传递)
+    local plan
+    plan=$(CALC_RESULT="$calc_result" \
+           LISTINGS_JSON="$listings_json" \
+           CHAR_FILE="$char_file" \
+           INSTANT_H="$MATERIAL_INSTANT_HOURS" \
+           LISTING_H="$MATERIAL_LISTING_HOURS" \
+           TRIGGER_H="$MATERIAL_TRIGGER_HOURS" \
+           python3 <<'PYEOF' 2>/dev/null || echo "[]"
+import json, os, math
+calc = json.loads(os.environ['CALC_RESULT'])
+try:
+    listings = json.loads(os.environ['LISTINGS_JSON'])
+except Exception:
+    listings = {'listings': []}
+with open(os.environ['CHAR_FILE']) as f:
     char = json.load(f)
 
 inventory = {}
@@ -964,49 +1470,99 @@ for item in char.get('characterItems', []):
     if item.get('itemLocationHrid') == '/item_locations/inventory':
         inventory[item['itemHrid']] = item.get('count', 0)
 
+def pending_buy(name):
+    tot = 0
+    for L in listings.get('listings', []):
+        if L.get('type') == 'Buy' and L.get('status') == 'Active' and L.get('item') == name:
+            tot += max(0, L.get('total', 0) - L.get('filled', 0))
+    return tot
+
 best = calc['best']
 aph = best['actions_per_hour']
-threshold_h = 6
-target_h = 9
-buy = []
+instant_h = float(os.environ['INSTANT_H'])
+listing_h = float(os.environ['LISTING_H'])
+trigger_h = float(os.environ['TRIGGER_H'])
+
+plan = []
 for inp in best.get('input_items', []):
     have = inventory.get(inp['hrid'], 0)
+    pending = pending_buy(inp['name'])
     consume_ph = inp['count'] * aph
-    hours_left = have / consume_ph if consume_ph > 0 else 999
-    if hours_left < threshold_h:
-        need = max(1, math.ceil(consume_ph * target_h - have))
-        buy.append({'name': inp['name'], 'qty': need, 'have': have, 'hours': round(hours_left, 1)})
+    if consume_ph <= 0:
+        continue
+    total_cov_h = (have + pending) / consume_ph
+    inv_h = have / consume_ph
+    pending_h = pending / consume_ph
+    if total_cov_h >= trigger_h:
+        continue
+    instant_need = max(0, math.ceil(consume_ph * instant_h - have))
+    listing_need = max(0, math.ceil(consume_ph * listing_h - pending))
+    plan.append({
+        'name': inp['name'],
+        'have': have,
+        'pending': pending,
+        'inv_h': round(inv_h, 1),
+        'pending_h': round(pending_h, 1),
+        'total_h': round(total_cov_h, 1),
+        'instant_need': instant_need,
+        'listing_need': listing_need,
+    })
+print(json.dumps(plan))
+PYEOF
+)
 
-print(json.dumps(buy))
-" 2>/dev/null || echo "[]")
-
-    if [[ "$buy_list" == "[]" ]] || [[ -z "$buy_list" ]]; then
-        log "材料充足, 无需补货"
+    if [[ "$plan" == "[]" ]] || [[ -z "$plan" ]]; then
+        log "材料覆盖均 >= ${MATERIAL_TRIGGER_HOURS}h, 无需补货"
         return 0
     fi
 
-    local count
-    count=$(echo "$buy_list" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
-    log "有 $count 种材料库存不足 6 小时, 开始补货到 9 小时"
+    local plan_count
+    plan_count=$(echo "$plan" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
+    log "有 $plan_count 种材料覆盖不足 ${MATERIAL_TRIGGER_HOURS}h, 开始补货"
 
     local i=0
-    while (( i < count )); do
-        local mat_name mat_qty mat_hours
-        read -r mat_name mat_qty mat_hours < <(echo "$buy_list" | python3 -c "
+    while (( i < plan_count )); do
+        local mat_name have pending inv_h pending_h total_h instant_need listing_need
+        read -r mat_name have pending inv_h pending_h total_h instant_need listing_need < <(echo "$plan" | python3 -c "
 import sys,json
 d = json.load(sys.stdin)[$i]
-print(d['name'], d['qty'], d['hours'])
+print(d['name'], d['have'], d['pending'], d['inv_h'], d['pending_h'], d['total_h'], d['instant_need'], d['listing_need'])
 " 2>/dev/null)
-        log "  → $mat_name: 剩余 ${mat_hours}h, 需购买 $mat_qty 个"
-        buy_from_marketplace "$mat_name" "$mat_qty" || {
-            log "  ✗ 购买 $mat_name 失败"
-        }
+        log "  → $mat_name: 库存 $have (${inv_h}h) + 挂单 $pending (${pending_h}h) = ${total_h}h"
+
+        # Step 1: 瞬间吃 ask 买到 instant_h
+        if (( instant_need > 0 )); then
+            log "    [瞬间] 吃 ask 买 $instant_need 个"
+            buy_from_marketplace "$mat_name" "$instant_need" || log "    ✗ 瞬间买失败"
+        fi
+
+        # Step 2: 挂 buy 单到 listing_h (挂在 best bid, 排队等成交)
+        if (( listing_need > 0 )); then
+            # 再检查下挂牌槽位
+            local used_now avail_now
+            listings_json=$(read_my_listings)
+            listings_json="${listings_json#\"}"
+            listings_json="${listings_json%\"}"
+            listings_json=$(echo "$listings_json" | sed 's/\\"/"/g; s/\\\\/\\/g')
+            used_now=$(echo "$listings_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('used', 0))" 2>/dev/null || echo "0")
+            avail_now=$(( MAX_LISTINGS - LISTING_RESERVE_SLOTS - used_now ))
+            if (( avail_now >= 1 )); then
+                log "    [挂单] 挂 $listing_need 个 @ best bid (剩 $avail_now 槽)"
+                post_buy_listing "$mat_name" "$listing_need" || log "    ✗ 挂单失败"
+            else
+                log "    [挂单] 挂牌槽位已满 ($used_now/$MAX_LISTINGS), 跳过挂单"
+            fi
+        fi
         i=$((i + 1))
     done
     return 0
 }
 
-# 自动卖出: 只卖 top1 最赚钱的产出物品, 保留 SELL_RESERVE 货值
+# 自动卖出 (v2): 挂 sell 单而非吃 bid 单
+# - 只卖 top1 最赚钱的产出物品
+# - 保留 SELL_RESERVE 货值
+# - 每次只挂溢出部分的 SELL_FRACTION (默认 20%), 防砸盘
+# - 检查挂牌数 <= MAX_LISTINGS - LISTING_RESERVE_SLOTS, 否则回退到直接吃 bid
 # 用法: auto_sell_output "$calc_result"
 auto_sell_output() {
     local calc_result="$1"
@@ -1026,16 +1582,40 @@ auto_sell_output() {
     log "产出物品: $output_name (库存: $inventory_count, bid: $bid_price)"
 
     # 计算保留量: SELL_RESERVE / bid 价格
-    local reserve_count sellable
+    local reserve_count excess
     reserve_count=$(python3 -c "print(max(0, int($SELL_RESERVE / $bid_price)))" 2>/dev/null || echo "0")
-    sellable=$(( inventory_count - reserve_count ))
+    excess=$(( inventory_count - reserve_count ))
 
-    if (( sellable <= 0 )); then
+    if (( excess <= 0 )); then
         log "库存 $inventory_count ≤ 保留量 $reserve_count (保留 ${SELL_RESERVE} 货值), 不卖"
         return 0
     fi
 
-    log "保留 $reserve_count 个 (≈${SELL_RESERVE} 货值), 可卖: $sellable 个"
+    # 每次只卖溢出部分的 SELL_FRACTION (防砸盘 + 防止一次大单引人注意)
+    local sellable
+    sellable=$(python3 -c "import math; print(max(1, int(math.ceil($excess * $SELL_FRACTION))))" 2>/dev/null || echo "1")
+    log "保留 $reserve_count 个 (≈${SELL_RESERVE} 货值), 溢出 $excess, 本次卖 $sellable (${SELL_FRACTION}x)"
+
+    # 检查挂牌是否有空余槽位
+    navigate_to_marketplace || { log "  ✗ 无法进入市场"; return 1; }
+    local listings_json used available_slots
+    listings_json=$(read_my_listings)
+    listings_json="${listings_json#\"}"
+    listings_json="${listings_json%\"}"
+    listings_json=$(echo "$listings_json" | sed 's/\\"/"/g; s/\\\\/\\/g')
+    used=$(echo "$listings_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('used', 0))" 2>/dev/null || echo "0")
+    available_slots=$(( MAX_LISTINGS - LISTING_RESERVE_SLOTS - used ))
+    log "  挂牌使用: $used / $MAX_LISTINGS (可用 $available_slots)"
+
+    if (( available_slots >= 1 )); then
+        # 有空位, 挂 sell 单在 best ask
+        post_sell_listing "$output_name" "$sellable" && return 0
+        log "  ⚠ 挂 sell 单失败, 回退到直接吃 bid"
+    else
+        log "  挂牌槽位已满, 回退到直接吃 bid"
+    fi
+
+    # 回退路径: 直接按 bid 价卖 (原有 v1 行为)
     sell_to_marketplace "$output_name" "$sellable"
 }
 
@@ -1144,6 +1724,7 @@ optimize_slot1_production() {
 
         if switch_production "$item_skill" "$item_category" "$item_name"; then
             log "✓ 已切换到 Top $((idx+1)): $item_name"
+            replenish_if_needed "$calc_result" "$char_file" || true
             auto_sell_output "$calc_result" || true
             date +%s > "$OPTIMIZE_LAST_RUN_FILE"
             return 0
@@ -1168,6 +1749,11 @@ play_slot() {
         return 1
     }
     sleep 8
+
+    # 每次登录后先到 My Listings 收菜
+    dismiss_modals
+    collect_all_listings || true
+    sleep 2
 
     # Slot 1: 执行利润优化
     if [[ "$slot" == "1" ]]; then
