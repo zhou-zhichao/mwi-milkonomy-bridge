@@ -230,9 +230,9 @@ dismiss_modals() {
     local snapshot close_refs ref
     # 用 snapshot 找 close 按钮 (CDP click 比 JS click 可靠)
     for _ in 1 2 3; do
-        snapshot=$("$AB" --cdp "$CDP_PORT" snapshot -i 2>/dev/null)
-        # 找 button "Close" / "X" / 类似
-        close_refs=$(echo "$snapshot" | grep -E 'button "(Close|✕|×)"' | grep -oP 'ref=\Ke\d+' | head -3)
+        snapshot=$("$AB" --cdp "$CDP_PORT" snapshot -i 2>/dev/null || true)
+        # 找 button "Close" / "X" / 类似 (|| true: grep 无匹配时防止 pipefail+set-e 退出)
+        close_refs=$(echo "$snapshot" | grep -E 'button "(Close|✕|×)"' | grep -oP 'ref=\Ke\d+' | head -3 || true)
         if [[ -z "$close_refs" ]]; then
             break
         fi
@@ -823,7 +823,8 @@ open_item_in_marketplace() {
 # 读订单簿的 best ask (最低卖价) 和 best bid (最高买价)
 # 输出格式: "best_ask best_bid" (两个数字, 空格分隔; 缺失用 0)
 get_order_book_top() {
-    "$AB" --cdp "$CDP_PORT" eval --stdin <<'BOOKEOF' 2>/dev/null || echo "0 0"
+    local raw
+    raw=$("$AB" --cdp "$CDP_PORT" eval --stdin <<'BOOKEOF' 2>/dev/null || echo '"0 0"'
 (function(){
   var tables = Array.from(document.querySelectorAll('table'));
   var parsePrice = function(t){ return parseInt((t||'').replace(/[^\d]/g,'')) || 0; };
@@ -847,6 +848,11 @@ get_order_book_top() {
   return ask + ' ' + bid;
 })()
 BOOKEOF
+)
+    # agent-browser eval 返回 JSON 编码的字符串 (带外层引号), 去掉它们
+    raw="${raw#\"}"
+    raw="${raw%\"}"
+    echo "$raw"
 }
 
 # 切到 My Listings tab; 读取所有挂牌, 返回 JSON
@@ -1017,10 +1023,22 @@ set_listing_quantity() {
     "$AB" --cdp "$CDP_PORT" eval -b "$(printf '%s' '(function(){var qty='"$qty"';var modal=document.querySelector("[class*=Modal_modal__]");if(!modal)return "no_modal";var input=modal.querySelector("input[type=number]");if(!input)return "no_input";var setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value").set;setter.call(input,String(qty));input.dispatchEvent(new Event("input",{bubbles:true}));return "ok:"+input.value;})()' | base64 -w0)" 2>/dev/null || echo "error"
 }
 
-# 派发完整事件序列点击模态里的按钮 (ref-based click 也能用, 但这里需要绕过 React 可能吞掉的 .click())
-dispatch_modal_button_click() {
+# 用 CDP 的 ref-click 点模态里的按钮 (React 同步事件; JS .click() 不可靠)
+click_modal_button() {
     local btn_text="$1"
-    "$AB" --cdp "$CDP_PORT" eval -b "$(printf '%s' '(function(){var text="'"$btn_text"'";var modal=document.querySelector("[class*=Modal_modal__]");if(!modal)return "no_modal";var btn=Array.from(modal.querySelectorAll("button")).find(function(b){return b.textContent.trim()===text;});if(!btn)return "no_btn";var r=btn.getBoundingClientRect();["mouseenter","mouseover","mousedown","pointerdown","pointerup","mouseup","click"].forEach(function(t){var C=t.indexOf("pointer")===0?PointerEvent:MouseEvent;try{btn.dispatchEvent(new C(t,{bubbles:true,cancelable:true,view:window,clientX:r.x+r.width/2,clientY:r.y+r.height/2}));}catch(e){}});return "ok";})()' | base64 -w0)" 2>/dev/null || echo "error"
+    local snap ref
+    snap=$("$AB" --cdp "$CDP_PORT" snapshot -i 2>/dev/null || true)
+    # 精确匹配完整按钮名 (如 "Post Sell Listing" 不能被误匹配为 "Post Sell Order")
+    ref=$(echo "$snap" | grep -F "button \"$btn_text\"" | head -1 | grep -oP 'ref=\Ke\d+' || true)
+    if [[ -z "$ref" ]]; then
+        echo "no_btn"
+        return 1
+    fi
+    "$AB" --cdp "$CDP_PORT" click "@$ref" 2>/dev/null || {
+        echo "click_failed"
+        return 1
+    }
+    echo "ok:$ref"
 }
 
 # 如果弹出 "价格异常" 的 Yes/No 确认框, 点 No 取消 (我们的挂单不应该触发这种警告)
@@ -1094,7 +1112,7 @@ post_sell_listing() {
     human_sleep 1 2
 
     # 6. 点 Post Sell Listing
-    r=$(dispatch_modal_button_click "Post Sell Listing")
+    r=$(click_modal_button "Post Sell Listing")
     if [[ "$r" != *ok* ]]; then
         log "    ✗ 点 Post Sell Listing 失败: $r"
         close_marketplace_modal
@@ -1161,7 +1179,7 @@ post_buy_listing() {
     fi
     human_sleep 1 2
 
-    r=$(dispatch_modal_button_click "Post Buy Listing")
+    r=$(click_modal_button "Post Buy Listing")
     if [[ "$r" != *ok* ]]; then
         log "    ✗ 点 Post Buy Listing 失败: $r"
         close_marketplace_modal
