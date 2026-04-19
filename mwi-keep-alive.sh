@@ -769,18 +769,31 @@ open_item_in_marketplace() {
     local b64
     b64=$(printf '%s' "$item_name" | base64 -w0)
 
-    # 先确保在 Market Listings tab (不是 My Listings)
-    local snap tab_ref
-    snap=$("$AB" --cdp "$CDP_PORT" snapshot -i 2>/dev/null || true)
-    tab_ref=$(echo "$snap" | grep -F 'tab "Market Listings"' | grep -v 'selected' | head -1 | grep -oP 'ref=\Ke\d+' || true)
-    if [[ -n "$tab_ref" ]]; then
-        "$AB" --cdp "$CDP_PORT" click "@$tab_ref" 2>/dev/null || true
-        human_sleep 1 2
+    # 先确保在 Market Listings tab (带验证重试, 因为 collect_all_listings 可能把我们留在 My Listings)
+    local attempt tab_verified=""
+    for attempt in 1 2 3; do
+        local snap
         snap=$("$AB" --cdp "$CDP_PORT" snapshot -i 2>/dev/null || true)
+        if echo "$snap" | grep -qE 'tab "Market Listings" \[selected'; then
+            tab_verified=1
+            break
+        fi
+        local tab_ref
+        tab_ref=$(echo "$snap" | grep -F 'tab "Market Listings"' | head -1 | grep -oP 'ref=\Ke\d+' || true)
+        if [[ -n "$tab_ref" ]]; then
+            "$AB" --cdp "$CDP_PORT" click "@$tab_ref" 2>/dev/null || true
+            human_sleep 2 3
+        else
+            human_sleep 1 2
+        fi
+    done
+    if [[ -z "$tab_verified" ]]; then
+        log "    ⚠ Market Listings tab 切换未确认"
     fi
 
-    # 搜索物品
-    local filter_ref
+    # 搜索物品 (先重新 snapshot 以拿到切换后的 filter_ref)
+    local snap filter_ref
+    snap=$("$AB" --cdp "$CDP_PORT" snapshot -i 2>/dev/null || true)
     filter_ref=$(echo "$snap" | grep -F 'searchbox "Item Filter"' | head -1 | grep -oP 'ref=\Ke\d+' || true)
     if [[ -z "$filter_ref" ]]; then
         log "    ✗ 找不到搜索框"
@@ -789,10 +802,17 @@ open_item_in_marketplace() {
     "$AB" --cdp "$CDP_PORT" fill "@$filter_ref" "$item_name" 2>/dev/null || true
     human_sleep 1 2
 
-    # 点击物品卡片 (限定在 MarketplacePanel 内)
-    local r
-    r=$("$AB" --cdp "$CDP_PORT" eval -b "$(printf '%s' '(function(){var b64="'"$b64"'";var name=atob(b64);var svgs=Array.from(document.querySelectorAll("svg[aria-label]"));var match=svgs.find(function(s){if(s.getAttribute("aria-label")!==name)return false;var el=s;while(el){if(el.className&&typeof el.className==="string"&&el.className.indexOf("MarketplacePanel")>=0)return true;el=el.parentElement;}return false;});if(!match)return "NOT_FOUND";var clickable=match.closest("[class*=Item_clickable],[class*=Item_item]");if(!clickable)return "NO_CLICKABLE";clickable.click();return "OK";})()' | base64 -w0)" 2>/dev/null || true)
-    if [[ "$r" != *OK* ]]; then
+    # 点击物品卡片 (限定在 MarketplacePanel 内, 重试 3 次应对搜索结果延迟渲染)
+    local r click_ok=""
+    for attempt in 1 2 3; do
+        r=$("$AB" --cdp "$CDP_PORT" eval -b "$(printf '%s' '(function(){var b64="'"$b64"'";var name=atob(b64);var svgs=Array.from(document.querySelectorAll("svg[aria-label]"));var match=svgs.find(function(s){if(s.getAttribute("aria-label")!==name)return false;var el=s;while(el){if(el.className&&typeof el.className==="string"&&el.className.indexOf("MarketplacePanel")>=0)return true;el=el.parentElement;}return false;});if(!match)return "NOT_FOUND";var clickable=match.closest("[class*=Item_clickable],[class*=Item_item]");if(!clickable)return "NO_CLICKABLE";clickable.click();return "OK";})()' | base64 -w0)" 2>/dev/null || true)
+        if [[ "$r" == *OK* ]]; then
+            click_ok=1
+            break
+        fi
+        sleep 2
+    done
+    if [[ -z "$click_ok" ]]; then
         log "    ✗ 市场中找不到 $item_name ($r)"
         return 1
     fi
@@ -858,14 +878,23 @@ BOOKEOF
 # 切到 My Listings tab; 读取所有挂牌, 返回 JSON
 # 格式: {"used": 3, "max": 23, "collectable": 0, "listings": [{item, type, filled, total, price}, ...]}
 read_my_listings() {
-    # 切到 My Listings tab
-    local snap tab_ref
-    snap=$("$AB" --cdp "$CDP_PORT" snapshot -i 2>/dev/null || true)
-    tab_ref=$(echo "$snap" | grep -P 'tab "My Listings' | grep -v 'selected' | head -1 | grep -oP 'ref=\Ke\d+' || true)
-    if [[ -n "$tab_ref" ]]; then
-        "$AB" --cdp "$CDP_PORT" click "@$tab_ref" 2>/dev/null || true
-        human_sleep 1 2
-    fi
+    # 切到 My Listings tab (带验证重试)
+    local attempt
+    for attempt in 1 2 3; do
+        local snap
+        snap=$("$AB" --cdp "$CDP_PORT" snapshot -i 2>/dev/null || true)
+        if echo "$snap" | grep -qE 'tab "My Listings[^"]*" \[selected'; then
+            break
+        fi
+        local tab_ref
+        tab_ref=$(echo "$snap" | grep -P 'tab "My Listings' | head -1 | grep -oP 'ref=\Ke\d+' || true)
+        if [[ -n "$tab_ref" ]]; then
+            "$AB" --cdp "$CDP_PORT" click "@$tab_ref" 2>/dev/null || true
+            human_sleep 2 3
+        else
+            human_sleep 1 2
+        fi
+    done
 
     "$AB" --cdp "$CDP_PORT" eval --stdin <<'LISTEOF' 2>/dev/null || echo '{"used":0,"max":23,"collectable":0,"listings":[]}'
 (function(){
@@ -917,7 +946,11 @@ read_my_listings() {
       }
     });
   }
-  return JSON.stringify({used: used, max: max, collectable: collectable, listings: listings});
+  // 兜底: 按 row 数据计算 Filled 条目数, 取 max (按钮读取可能滞后, 但 row 状态更新及时)
+  var collectableFromRows = listings.filter(function(L){ return L.status === 'Filled' || L.status === 'Completed'; }).length;
+  // used 也兜底: 如果 counter 没读到, 用 listings.length
+  if (used === 0 && listings.length > 0) used = listings.length;
+  return JSON.stringify({used: used, max: max, collectable: Math.max(collectable, collectableFromRows), listings: listings});
 })()
 LISTEOF
 }
@@ -1234,16 +1267,15 @@ buy_missing_and_retry() {
     local i=0
     while (( i < buy_count )); do
         local mat_name mat_qty
-        read -r mat_name mat_qty < <(echo "$missing_json" | python3 -c "
+        # tab 分隔, 物品名可能含空格
+        IFS=$'\t' read -r mat_name mat_qty < <(echo "$missing_json" | python3 -c "
 import sys, json, math
 d = json.load(sys.stdin)
 dur = max(1, d.get('duration_s', 10))
 mat = d['missing'][$i]
-# 9 小时的生产次数
 runs_9h = 9 * 3600 / dur
-# 需要购买: 每次消耗 × 次数 - 已有量, 向上取整
 qty = max(1, math.ceil(mat['need'] * runs_9h - mat['have']))
-print(mat['name'], qty)
+print(mat['name'] + '\t' + str(qty))
 " 2>/dev/null)
         log "  → 需购买 $mat_name: $mat_qty 个 (够 9 小时)"
         buy_from_marketplace "$mat_name" "$mat_qty" || {
@@ -1541,10 +1573,11 @@ PYEOF
     local i=0
     while (( i < plan_count )); do
         local mat_name have pending inv_h pending_h total_h instant_need listing_need
-        read -r mat_name have pending inv_h pending_h total_h instant_need listing_need < <(echo "$plan" | python3 -c "
+        # 用 tab 分隔 (物品名含空格如 "Cheesesmithing Essence")
+        IFS=$'\t' read -r mat_name have pending inv_h pending_h total_h instant_need listing_need < <(echo "$plan" | python3 -c "
 import sys,json
 d = json.load(sys.stdin)[$i]
-print(d['name'], d['have'], d['pending'], d['inv_h'], d['pending_h'], d['total_h'], d['instant_need'], d['listing_need'])
+print('\t'.join([d['name'], str(d['have']), str(d['pending']), str(d['inv_h']), str(d['pending_h']), str(d['total_h']), str(d['instant_need']), str(d['listing_need'])]))
 " 2>/dev/null)
         log "  → $mat_name: 库存 $have (${inv_h}h) + 挂单 $pending (${pending_h}h) = ${total_h}h"
 
