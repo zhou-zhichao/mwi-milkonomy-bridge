@@ -186,6 +186,30 @@ class TestSummarize(unittest.TestCase):
         self.assertEqual(s["ask_min"], 100)
         self.assertEqual(s["ask_max"], 200)
 
+    def test_summary_current_sentinel_still_reports_history(self):
+        rows = [
+            (3000, -1, -1, 0, 0),
+            (2000, 100, 95, 98, 50),
+            (1000, 200, 180, 190, 50),
+        ]
+        s = mwi_prices.summarize(rows)
+        self.assertEqual(s["current_ask"], -1)
+        self.assertEqual(s["ask_min"], 100)
+        self.assertEqual(s["ask_max"], 200)
+        self.assertIsNone(s["ask_percentile"])
+        self.assertEqual(s["sample_size"], 2)
+
+    def test_summary_current_none_does_not_crash(self):
+        rows = [
+            (3000, None, None, None, None),
+            (2000, 100, 95, 98, 50),
+        ]
+        s = mwi_prices.summarize(rows)
+        self.assertIsNone(s["current_ask"])
+        self.assertEqual(s["ask_min"], 100)
+        self.assertIsNone(s["ask_percentile"])
+        self.assertEqual(s["sample_size"], 1)
+
     def test_summary_empty(self):
         self.assertIsNone(mwi_prices.summarize([]))
 

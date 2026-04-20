@@ -180,6 +180,6 @@ def summarize(rows: list[tuple]) -> dict | None:
         "ask_max": max_v,
         "ask_max_ts": max_ts,
         "ask_avg": round(sum(asks) / len(asks), 2),
-        "ask_percentile": percentile(asks, current_ask) if current_ask > 0 else None,
+        "ask_percentile": percentile(asks, current_ask) if (current_ask is not None and current_ask > 0) else None,
         "sample_size": len(asks),
     }
