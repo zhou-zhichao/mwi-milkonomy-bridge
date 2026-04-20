@@ -34,3 +34,45 @@ def open_db(path: str | Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
     conn.executescript(_SCHEMA)
     conn.commit()
     return conn
+
+
+def latest_timestamp(conn: sqlite3.Connection) -> int | None:
+    row = conn.execute("SELECT MAX(timestamp) FROM price_history").fetchone()
+    return row[0] if row and row[0] is not None else None
+
+
+def insert_snapshot(
+    conn: sqlite3.Connection,
+    timestamp: int,
+    market_data: dict,
+) -> int:
+    """Insert one full snapshot. Returns number of rows inserted.
+
+    `market_data` maps item_hrid -> { level_str -> {a, b, p, v} }.
+    Uses INSERT OR IGNORE, so re-running with the same timestamp is a no-op.
+    """
+    rows = []
+    for item_hrid, levels in market_data.items():
+        for level_str, tier in levels.items():
+            try:
+                level = int(level_str)
+            except (TypeError, ValueError):
+                continue
+            rows.append((
+                timestamp,
+                item_hrid,
+                level,
+                tier.get("a"),
+                tier.get("b"),
+                tier.get("p"),
+                tier.get("v"),
+            ))
+    before = conn.total_changes
+    with conn:
+        conn.executemany(
+            "INSERT OR IGNORE INTO price_history "
+            "(timestamp, item_hrid, level, ask, bid, last_price, volume) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+    return conn.total_changes - before
