@@ -52,14 +52,18 @@ def _print_single(conn, item_hrid: str, level: int, days: int, out=None):
           f"bid {_fmt_int(s['current_bid'])}   "
           f"at {_fmt_ts(s['current_ts'])}", file=out)
     if s["ask_avg"] is not None:
-        print(f"{days}d avg:   ask {s['ask_avg']}", file=out)
-        print(f"{days}d low:   ask {s['ask_min']}  ({_fmt_ts(s['ask_min_ts'])})",
+        print(f"{days}d avg:   ask {_fmt_int(s['ask_avg'])}", file=out)
+        print(f"{days}d low:   ask {_fmt_int(s['ask_min'])}  ({_fmt_ts(s['ask_min_ts'])})",
               file=out)
-        print(f"{days}d high:  ask {s['ask_max']}  ({_fmt_ts(s['ask_max_ts'])})",
+        print(f"{days}d high:  ask {_fmt_int(s['ask_max'])}  ({_fmt_ts(s['ask_max_ts'])})",
               file=out)
-        print(f"percentile: current ask at {s['ask_percentile']}%  "
-              f"({'低位可考虑买入' if s['ask_percentile'] <= 20 else 'neutral'})",
-              file=out)
+        pct = s["ask_percentile"]
+        if pct is None:
+            print(f"percentile: n/a (current ask = {_fmt_int(s['current_ask'])})",
+                  file=out)
+        else:
+            tag = "低位可考虑买入" if pct <= 20 else "中位"
+            print(f"percentile: current ask at {pct}%  ({tag})", file=out)
     print("", file=out)
     print(f"{'time':<18}{'ask':>8}{'bid':>8}{'vol':>10}", file=out)
     for ts, ask, bid, _p, vol in rows[:MAX_ROWS_SHOWN]:

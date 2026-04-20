@@ -1,4 +1,5 @@
 import sqlite3
+import time
 import unittest
 from pathlib import Path
 import sys
@@ -304,7 +305,6 @@ class TestQueryCLI(unittest.TestCase):
         if self.tmp_db.exists():
             self.tmp_db.unlink()
         conn = mwi_prices.open_db(str(self.tmp_db))
-        import time
         step = 4 * 3600
         prices = [240, 220, 210, 200, 195, 190, 185, 180, 170, 165, 180]
         # Anchor base so the last sample is ~now; all 11 samples fit inside 30 days.
@@ -345,6 +345,33 @@ class TestQueryCLI(unittest.TestCase):
         rc, out = self._capture(["nonexistent_thing_xyz"])
         self.assertNotEqual(rc, 0)
         self.assertIn("no match", out.lower())
+
+    def test_single_item_handles_sentinel_current_ask(self):
+        # Current price is -1 (unavailable) but history has valid asks.
+        # percentile should be n/a, min/max should still render.
+        tmp_db2 = Path(self.id() + "_b.db")
+        if tmp_db2.exists():
+            tmp_db2.unlink()
+        conn = mwi_prices.open_db(str(tmp_db2))
+        step = 4 * 3600
+        base = int(time.time()) - 3 * step
+        mwi_prices.insert_snapshot(conn, base,         {"/items/niche": {"0": {"a": 100, "b": 95, "p": 98, "v": 10}}})
+        mwi_prices.insert_snapshot(conn, base + step,  {"/items/niche": {"0": {"a": 150, "b": 145, "p": 148, "v": 10}}})
+        mwi_prices.insert_snapshot(conn, base + 2*step,{"/items/niche": {"0": {"a": 200, "b": 195, "p": 198, "v": 10}}})
+        mwi_prices.insert_snapshot(conn, base + 3*step,{"/items/niche": {"0": {"a": -1,  "b": -1,  "p": 0,   "v": 0}}})
+        conn.close()
+        try:
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                rc = self.q.main(["niche", "--db", str(tmp_db2)])
+            out = buf.getvalue()
+            self.assertEqual(rc, 0)
+            self.assertIn("n/a", out)          # percentile cannot be computed
+            self.assertIn("100", out)          # ask_min still shown
+            self.assertIn("200", out)          # ask_max still shown
+        finally:
+            if tmp_db2.exists():
+                tmp_db2.unlink()
 
 
 if __name__ == "__main__":
