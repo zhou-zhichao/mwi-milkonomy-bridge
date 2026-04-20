@@ -139,5 +139,56 @@ class TestQueries(unittest.TestCase):
         )
 
 
+class TestPercentile(unittest.TestCase):
+    def test_single_value(self):
+        self.assertEqual(mwi_prices.percentile([100], 100), 50.0)
+
+    def test_lowest(self):
+        self.assertEqual(mwi_prices.percentile([100, 200, 300], 100), 0.0)
+
+    def test_highest(self):
+        self.assertEqual(mwi_prices.percentile([100, 200, 300], 300), 100.0)
+
+    def test_middle(self):
+        self.assertEqual(mwi_prices.percentile([100, 200, 300], 200), 50.0)
+
+    def test_current_not_in_list(self):
+        self.assertEqual(mwi_prices.percentile([100, 200, 300], 150), 50.0)
+
+    def test_empty_returns_none(self):
+        self.assertIsNone(mwi_prices.percentile([], 100))
+
+
+class TestSummarize(unittest.TestCase):
+    def test_summary_includes_current_min_max_avg_percentile(self):
+        rows = [
+            (3000, 180, 175, 175, 100),
+            (2000, 165, 160, 162, 100),
+            (1000, 240, 230, 235, 100),
+        ]
+        s = mwi_prices.summarize(rows)
+        self.assertEqual(s["current_ask"], 180)
+        self.assertEqual(s["current_bid"], 175)
+        self.assertEqual(s["ask_min"], 165)
+        self.assertEqual(s["ask_min_ts"], 2000)
+        self.assertEqual(s["ask_max"], 240)
+        self.assertEqual(s["ask_max_ts"], 1000)
+        self.assertEqual(s["ask_avg"], round((180 + 165 + 240) / 3, 2))
+        self.assertEqual(s["ask_percentile"], 50.0)
+
+    def test_summary_ignores_negative(self):
+        rows = [
+            (3000, 100, 90, 95, 50),
+            (2000, -1, -1, 0, 0),
+            (1000, 200, 180, 190, 50),
+        ]
+        s = mwi_prices.summarize(rows)
+        self.assertEqual(s["ask_min"], 100)
+        self.assertEqual(s["ask_max"], 200)
+
+    def test_summary_empty(self):
+        self.assertIsNone(mwi_prices.summarize([]))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -129,3 +129,57 @@ def items_with_data(conn: sqlite3.Connection, level: int = 0) -> list[str]:
         (level,),
     ).fetchall()
     return [r[0] for r in rows]
+
+
+def percentile(values: list[int], current: int) -> float | None:
+    """Rank of `current` in sorted `values`, as a 0-100 percentile.
+
+    Formula: (rank - 1) / (n - 1) * 100, rank counted by strictly-less-than.
+    n == 1 -> 50.0 (no spread to compare against).
+    Empty -> None.
+    """
+    if not values:
+        return None
+    n = len(values)
+    if n == 1:
+        return 50.0
+    rank = sum(1 for v in values if v < current) + 1
+    rank = max(1, min(rank, n))
+    return round((rank - 1) / (n - 1) * 100, 2)
+
+
+def summarize(rows: list[tuple]) -> dict | None:
+    """Compute current / min / max / avg / percentile for ask.
+
+    `rows` is history() output: (timestamp, ask, bid, last_price, volume), newest first.
+    Ignores rows with ask <= 0 for ask stats. Returns None if no rows.
+    """
+    if not rows:
+        return None
+    current_ts, current_ask, current_bid, *_ = rows[0]
+    ask_rows = [(ts, a) for ts, a, *_ in rows if a is not None and a > 0]
+    if not ask_rows:
+        return {
+            "current_ts": current_ts,
+            "current_ask": current_ask,
+            "current_bid": current_bid,
+            "ask_min": None, "ask_min_ts": None,
+            "ask_max": None, "ask_max_ts": None,
+            "ask_avg": None, "ask_percentile": None,
+            "sample_size": 0,
+        }
+    asks = [a for _, a in ask_rows]
+    min_ts, min_v = min(ask_rows, key=lambda r: r[1])
+    max_ts, max_v = max(ask_rows, key=lambda r: r[1])
+    return {
+        "current_ts": current_ts,
+        "current_ask": current_ask,
+        "current_bid": current_bid,
+        "ask_min": min_v,
+        "ask_min_ts": min_ts,
+        "ask_max": max_v,
+        "ask_max_ts": max_ts,
+        "ask_avg": round(sum(asks) / len(asks), 2),
+        "ask_percentile": percentile(asks, current_ask) if current_ask > 0 else None,
+        "sample_size": len(asks),
+    }
