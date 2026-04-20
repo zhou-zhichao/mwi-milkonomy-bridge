@@ -287,5 +287,65 @@ class TestLogger(unittest.TestCase):
         conn.close()
 
 
+def _load_query():
+    spec = importlib.util.spec_from_file_location(
+        "mwi_price_query",
+        Path(__file__).resolve().parents[1] / "mwi-price-query.py",
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class TestQueryCLI(unittest.TestCase):
+    def setUp(self):
+        self.q = _load_query()
+        self.tmp_db = Path(self.id() + ".db")
+        if self.tmp_db.exists():
+            self.tmp_db.unlink()
+        conn = mwi_prices.open_db(str(self.tmp_db))
+        import time
+        step = 4 * 3600
+        prices = [240, 220, 210, 200, 195, 190, 185, 180, 170, 165, 180]
+        # Anchor base so the last sample is ~now; all 11 samples fit inside 30 days.
+        base = int(time.time()) - (len(prices) - 1) * step
+        for i, ask in enumerate(prices):
+            mwi_prices.insert_snapshot(conn, base + i * step, {
+                "/items/cheese": {"0": {"a": ask, "b": ask - 5, "p": ask - 5, "v": 1000}},
+                "/items/bronze_bar": {"0": {"a": 50, "b": 48, "p": 49, "v": 500}},
+                "/items/iron_bar": {"0": {"a": 100, "b": 95, "p": 98, "v": 300}},
+            })
+        conn.close()
+
+    def tearDown(self):
+        if self.tmp_db.exists():
+            self.tmp_db.unlink()
+
+    def _capture(self, argv):
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            rc = self.q.main(argv + ["--db", str(self.tmp_db)])
+        return rc, buf.getvalue()
+
+    def test_single_item_output(self):
+        rc, out = self._capture(["cheese", "--days", "30"])
+        self.assertEqual(rc, 0)
+        self.assertIn("/items/cheese", out)
+        self.assertIn("current", out.lower())
+        self.assertIn("180", out)   # current ask
+        self.assertIn("165", out)   # min
+        self.assertIn("240", out)   # max
+
+    def test_ambiguous_match_lists_candidates(self):
+        rc, out = self._capture(["ar"])
+        self.assertNotEqual(rc, 0)
+        self.assertIn("bronze_bar", out)
+
+    def test_no_match_errors(self):
+        rc, out = self._capture(["nonexistent_thing_xyz"])
+        self.assertNotEqual(rc, 0)
+        self.assertIn("no match", out.lower())
+
+
 if __name__ == "__main__":
     unittest.main()
