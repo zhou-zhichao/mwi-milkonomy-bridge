@@ -74,5 +74,70 @@ class TestInsertSnapshot(unittest.TestCase):
         self.assertEqual(mwi_prices.latest_timestamp(self.conn), 2000)
 
 
+class TestQueries(unittest.TestCase):
+    def setUp(self):
+        self.conn = mwi_prices.open_db(":memory:")
+        snaps = {
+            1000: {
+                "/items/cheese": {"0": {"a": 200, "b": 190, "p": 195, "v": 1000}},
+                "/items/bronze_bar": {"0": {"a": 50, "b": 48, "p": 49, "v": 500}},
+                "/items/iron_bar": {"0": {"a": 100, "b": 95, "p": 98, "v": 300}},
+            },
+            2000: {
+                "/items/cheese": {"0": {"a": 180, "b": 175, "p": 175, "v": 900}},
+                "/items/bronze_bar": {"0": {"a": 45, "b": 43, "p": 44, "v": 600}},
+                "/items/iron_bar": {"0": {"a": 105, "b": 100, "p": 102, "v": 310}},
+            },
+        }
+        for ts, data in snaps.items():
+            mwi_prices.insert_snapshot(self.conn, ts, data)
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_fuzzy_match_unique(self):
+        self.assertEqual(mwi_prices.fuzzy_match(self.conn, "cheese"), ["/items/cheese"])
+
+    def test_fuzzy_match_exact_hrid(self):
+        self.assertEqual(
+            mwi_prices.fuzzy_match(self.conn, "/items/cheese"),
+            ["/items/cheese"],
+        )
+
+    def test_fuzzy_match_ambiguous(self):
+        self.assertEqual(
+            sorted(mwi_prices.fuzzy_match(self.conn, "bar")),
+            ["/items/bronze_bar", "/items/iron_bar"],
+        )
+
+    def test_fuzzy_match_none(self):
+        self.assertEqual(mwi_prices.fuzzy_match(self.conn, "nonexistent"), [])
+
+    def test_latest_row(self):
+        row = mwi_prices.latest_row(self.conn, "/items/cheese", 0)
+        self.assertEqual(row, (2000, 180, 175, 175, 900))
+
+    def test_latest_row_missing(self):
+        self.assertIsNone(mwi_prices.latest_row(self.conn, "/items/missing", 0))
+
+    def test_history_returns_desc(self):
+        rows = mwi_prices.history(self.conn, "/items/cheese", 0, since_ts=0)
+        self.assertEqual(rows, [
+            (2000, 180, 175, 175, 900),
+            (1000, 200, 190, 195, 1000),
+        ])
+
+    def test_history_since(self):
+        rows = mwi_prices.history(self.conn, "/items/cheese", 0, since_ts=1500)
+        self.assertEqual(rows, [(2000, 180, 175, 175, 900)])
+
+    def test_items_with_data(self):
+        items = mwi_prices.items_with_data(self.conn, level=0)
+        self.assertEqual(
+            sorted(items),
+            ["/items/bronze_bar", "/items/cheese", "/items/iron_bar"],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -76,3 +76,56 @@ def insert_snapshot(
             rows,
         )
     return conn.total_changes - before
+
+
+def fuzzy_match(conn: sqlite3.Connection, query: str) -> list[str]:
+    """Return item_hrids containing `query` as substring (case-insensitive).
+
+    Exact match on full hrid short-circuits to [query].
+    """
+    row = conn.execute(
+        "SELECT 1 FROM price_history WHERE item_hrid = ? LIMIT 1", (query,)
+    ).fetchone()
+    if row:
+        return [query]
+    pattern = f"%{query.lower()}%"
+    rows = conn.execute(
+        "SELECT DISTINCT item_hrid FROM price_history "
+        "WHERE LOWER(item_hrid) LIKE ? ORDER BY item_hrid",
+        (pattern,),
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def latest_row(
+    conn: sqlite3.Connection, item_hrid: str, level: int
+) -> tuple | None:
+    """Return (timestamp, ask, bid, last_price, volume) for newest row, or None."""
+    return conn.execute(
+        "SELECT timestamp, ask, bid, last_price, volume FROM price_history "
+        "WHERE item_hrid = ? AND level = ? ORDER BY timestamp DESC LIMIT 1",
+        (item_hrid, level),
+    ).fetchone()
+
+
+def history(
+    conn: sqlite3.Connection,
+    item_hrid: str,
+    level: int,
+    since_ts: int,
+) -> list[tuple]:
+    """Rows newer than since_ts, newest first."""
+    return conn.execute(
+        "SELECT timestamp, ask, bid, last_price, volume FROM price_history "
+        "WHERE item_hrid = ? AND level = ? AND timestamp >= ? "
+        "ORDER BY timestamp DESC",
+        (item_hrid, level, since_ts),
+    ).fetchall()
+
+
+def items_with_data(conn: sqlite3.Connection, level: int = 0) -> list[str]:
+    rows = conn.execute(
+        "SELECT DISTINCT item_hrid FROM price_history WHERE level = ?",
+        (level,),
+    ).fetchall()
+    return [r[0] for r in rows]
