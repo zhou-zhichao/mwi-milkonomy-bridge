@@ -13,6 +13,7 @@ import argparse
 import datetime as _dt
 import json
 import sys
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -33,8 +34,8 @@ def fetch_marketplace(url: str = MARKET_URL) -> dict:
 def run(db_path: str | Path = mwi_prices.DEFAULT_DB_PATH) -> int:
     try:
         payload = fetch_marketplace()
-    except Exception as e:
-        print(f"ERROR: fetch failed: {e}", file=sys.stderr)
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as e:
+        print(f"ERROR: fetch failed: {type(e).__name__}: {e}", file=sys.stderr)
         return 1
 
     ts = payload.get("timestamp")
