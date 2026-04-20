@@ -214,5 +214,78 @@ class TestSummarize(unittest.TestCase):
         self.assertIsNone(mwi_prices.summarize([]))
 
 
+import importlib.util
+import io
+import json
+from unittest.mock import patch
+
+
+def _load_logger():
+    spec = importlib.util.spec_from_file_location(
+        "mwi_price_logger",
+        Path(__file__).resolve().parents[1] / "mwi-price-logger.py",
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class TestLogger(unittest.TestCase):
+    def setUp(self):
+        self.logger = _load_logger()
+        self.tmp_db = Path(self.id() + ".db")
+        if self.tmp_db.exists():
+            self.tmp_db.unlink()
+
+    def tearDown(self):
+        if self.tmp_db.exists():
+            self.tmp_db.unlink()
+
+    def _fake_urlopen(self, payload):
+        body = json.dumps(payload).encode()
+        class Resp:
+            def __enter__(self_): return self_
+            def __exit__(self_, *a): return False
+            def read(self_): return body
+        return Resp()
+
+    def test_first_run_inserts(self):
+        payload = {"timestamp": 1000, "marketData": SAMPLE_MARKET}
+        with patch.object(self.logger.urllib.request, "urlopen",
+                          return_value=self._fake_urlopen(payload)):
+            rc = self.logger.run(db_path=str(self.tmp_db))
+        self.assertEqual(rc, 0)
+        conn = mwi_prices.open_db(str(self.tmp_db))
+        (count,) = conn.execute("SELECT COUNT(*) FROM price_history").fetchone()
+        self.assertEqual(count, 3)
+        conn.close()
+
+    def test_duplicate_timestamp_is_noop(self):
+        payload = {"timestamp": 1000, "marketData": SAMPLE_MARKET}
+        with patch.object(self.logger.urllib.request, "urlopen",
+                          return_value=self._fake_urlopen(payload)):
+            self.logger.run(db_path=str(self.tmp_db))
+            rc = self.logger.run(db_path=str(self.tmp_db))
+        self.assertEqual(rc, 0)
+        conn = mwi_prices.open_db(str(self.tmp_db))
+        (count,) = conn.execute("SELECT COUNT(*) FROM price_history").fetchone()
+        self.assertEqual(count, 3)
+        conn.close()
+
+    def test_new_timestamp_adds_rows(self):
+        p1 = {"timestamp": 1000, "marketData": SAMPLE_MARKET}
+        p2 = {"timestamp": 2000, "marketData": SAMPLE_MARKET}
+        with patch.object(self.logger.urllib.request, "urlopen",
+                          return_value=self._fake_urlopen(p1)):
+            self.logger.run(db_path=str(self.tmp_db))
+        with patch.object(self.logger.urllib.request, "urlopen",
+                          return_value=self._fake_urlopen(p2)):
+            self.logger.run(db_path=str(self.tmp_db))
+        conn = mwi_prices.open_db(str(self.tmp_db))
+        (count,) = conn.execute("SELECT COUNT(*) FROM price_history").fetchone()
+        self.assertEqual(count, 6)
+        conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()
