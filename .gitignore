@@ -11,4 +11,5 @@ __pycache__/
 .context/
 ~/
 logs/
+data/
 mwi-start-fail.png
