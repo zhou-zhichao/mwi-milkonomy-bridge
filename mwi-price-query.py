@@ -24,12 +24,16 @@ def _fmt_ts(ts: int) -> str:
 
 
 def _fmt_int(v) -> str:
-    if v is None or v < 0:
+    if v is None:
+        return "—"
+    if v < 0:
         return "—"
     if v >= 1_000_000:
         return f"{v / 1_000_000:.1f}M"
     if v >= 1_000:
         return f"{v / 1_000:.0f}k"
+    if isinstance(v, float):
+        return f"{v:.0f}"
     return str(v)
 
 
@@ -96,7 +100,7 @@ def _print_cheap(conn, level: int, days: int, threshold: float, out=None):
           file=out)
     for pct, hrid, s in results:
         print(f"{hrid:<40}{_fmt_int(s['current_ask']):>10}"
-              f"{_fmt_int(s['ask_min']):>10}{s['ask_avg']!s:>10}"
+              f"{_fmt_int(s['ask_min']):>10}{_fmt_int(s['ask_avg']):>10}"
               f"{pct:>7.1f}%", file=out)
 
 
