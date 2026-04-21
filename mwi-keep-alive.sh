@@ -878,6 +878,8 @@ BOOKEOF
 # 切到 My Listings tab; 读取所有挂牌, 返回 JSON
 # 格式: {"used": 3, "max": 23, "collectable": 0, "listings": [{item, type, filled, total, price}, ...]}
 read_my_listings() {
+    # 注意: 这个函数的最终 stdout 返回给调用方, 所以中间所有 agent-browser 命令
+    # 都要 >/dev/null, 否则 "✓ Done" 会污染返回值
     # 切到 My Listings tab (带验证重试)
     local attempt
     for attempt in 1 2 3; do
@@ -889,7 +891,7 @@ read_my_listings() {
         local tab_ref
         tab_ref=$(echo "$snap" | grep -P 'tab "My Listings' | head -1 | grep -oP 'ref=\Ke\d+' || true)
         if [[ -n "$tab_ref" ]]; then
-            "$AB" --cdp "$CDP_PORT" click "@$tab_ref" 2>/dev/null || true
+            "$AB" --cdp "$CDP_PORT" click "@$tab_ref" >/dev/null 2>&1 || true
             human_sleep 2 3
         else
             human_sleep 1 2
