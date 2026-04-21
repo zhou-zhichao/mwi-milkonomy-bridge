@@ -159,6 +159,14 @@ class TestPercentile(unittest.TestCase):
     def test_empty_returns_none(self):
         self.assertIsNone(mwi_prices.percentile([], 100))
 
+    def test_flat_values_returns_50(self):
+        # No spread -> rank not meaningful, return neutral (same as n=1 case).
+        self.assertEqual(mwi_prices.percentile([100, 100, 100], 100), 50.0)
+
+    def test_flat_values_current_outside(self):
+        # Even if current differs, no historical spread means no rank signal.
+        self.assertEqual(mwi_prices.percentile([100, 100, 100], 120), 50.0)
+
 
 class TestSummarize(unittest.TestCase):
     def test_summary_includes_current_min_max_avg_percentile(self):
@@ -372,6 +380,47 @@ class TestQueryCLI(unittest.TestCase):
         finally:
             if tmp_db2.exists():
                 tmp_db2.unlink()
+
+
+class TestCheapScan(unittest.TestCase):
+    def setUp(self):
+        self.q = _load_query()
+        self.tmp_db = Path(self.id() + ".db")
+        if self.tmp_db.exists():
+            self.tmp_db.unlink()
+        conn = mwi_prices.open_db(str(self.tmp_db))
+        step = 4 * 3600
+        base = int(time.time()) - 6 * step  # anchor last sample near now
+        cheap_series = [200, 210, 220, 230, 240, 210, 150]  # current at 0th percentile
+        steady_series = [100, 100, 100, 100, 100, 100, 100]  # flat, 50th
+        for i in range(7):
+            mwi_prices.insert_snapshot(conn, base + i * step, {
+                "/items/cheap_item":  {"0": {"a": cheap_series[i],  "b": cheap_series[i] - 5,  "p": 0, "v": 100}},
+                "/items/steady_item": {"0": {"a": steady_series[i], "b": steady_series[i] - 5, "p": 0, "v": 100}},
+            })
+        conn.close()
+
+    def tearDown(self):
+        if self.tmp_db.exists():
+            self.tmp_db.unlink()
+
+    def _capture(self, argv):
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            rc = self.q.main(argv + ["--db", str(self.tmp_db)])
+        return rc, buf.getvalue()
+
+    def test_cheap_lists_low_percentile_item(self):
+        rc, out = self._capture(["--cheap", "--days", "30", "--percentile", "20"])
+        self.assertEqual(rc, 0)
+        self.assertIn("cheap_item", out)
+        self.assertNotIn("steady_item", out)
+
+    def test_cheap_respects_percentile_threshold(self):
+        rc, out = self._capture(["--cheap", "--days", "30", "--percentile", "60"])
+        self.assertEqual(rc, 0)
+        self.assertIn("cheap_item", out)
+        self.assertIn("steady_item", out)
 
 
 if __name__ == "__main__":

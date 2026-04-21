@@ -73,6 +73,33 @@ def _print_single(conn, item_hrid: str, level: int, days: int, out=None):
         print(f"... ({len(rows) - MAX_ROWS_SHOWN} more rows)", file=out)
 
 
+def _print_cheap(conn, level: int, days: int, threshold: float, out=None):
+    if out is None:
+        out = sys.stdout
+    since = _since_ts(days)
+    items = mwi_prices.items_with_data(conn, level=level)
+    results = []
+    for hrid in items:
+        rows = mwi_prices.history(conn, hrid, level, since)
+        s = mwi_prices.summarize(rows)
+        if not s or s["ask_percentile"] is None:
+            continue
+        if s["sample_size"] < 2:
+            continue
+        if s["ask_percentile"] <= threshold:
+            results.append((s["ask_percentile"], hrid, s))
+    results.sort()
+    print(f"Items with current ask ≤ {threshold}th percentile over last {days} days "
+          f"({len(results)} hit)", file=out)
+    print("─" * 80, file=out)
+    print(f"{'item':<40}{'current':>10}{'min':>10}{'avg':>10}{'pct':>8}",
+          file=out)
+    for pct, hrid, s in results:
+        print(f"{hrid:<40}{_fmt_int(s['current_ask']):>10}"
+              f"{_fmt_int(s['ask_min']):>10}{s['ask_avg']!s:>10}"
+              f"{pct:>7.1f}%", file=out)
+
+
 def _resolve_item(conn, query: str, out=None) -> str | None:
     if out is None:
         out = sys.stdout
@@ -111,8 +138,8 @@ def main(argv: list[str] | None = None) -> int:
     conn = mwi_prices.open_db(db_path)
     try:
         if args.cheap:
-            print("--cheap mode not yet implemented.", file=sys.stdout)
-            return 2
+            _print_cheap(conn, args.level, args.days, args.percentile)
+            return 0
         if not args.item:
             p.print_help()
             return 2

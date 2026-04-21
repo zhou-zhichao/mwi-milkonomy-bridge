@@ -135,13 +135,13 @@ def percentile(values: list[int], current: int) -> float | None:
     """Rank of `current` in sorted `values`, as a 0-100 percentile.
 
     Formula: (rank - 1) / (n - 1) * 100, rank counted by strictly-less-than.
-    n == 1 -> 50.0 (no spread to compare against).
-    Empty -> None.
+    Returns 50.0 when there is no spread (single value or all equal), since
+    rank is not meaningful. Empty -> None.
     """
     if not values:
         return None
     n = len(values)
-    if n == 1:
+    if n == 1 or min(values) == max(values):
         return 50.0
     rank = sum(1 for v in values if v < current) + 1
     rank = max(1, min(rank, n))
