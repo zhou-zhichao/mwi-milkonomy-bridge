@@ -45,6 +45,30 @@
 - `www.milkywayidlecn.com`
 - `test.milkywayidlecn.com`
 
+## 历史价格记录
+
+采集 MWI 公开的 `marketplace.json` 到本地 SQLite，用于查找买入时机。
+
+### 安装 cron
+
+```bash
+./install-price-logger-cron.sh
+```
+
+这会在当前用户的 crontab 里加一条每 30 分钟运行一次的任务（官方数据 4 小时刷新一次，脚本会按 timestamp 自动去重）。
+
+### 查询用法
+
+```bash
+# 单物品走势
+python3 mwi-price-query.py cheese --days 30
+
+# 扫描当前处于历史低位的物品（默认阈值 20 分位）
+python3 mwi-price-query.py --cheap --days 30 --percentile 20
+```
+
+数据库位于 `data/prices.db`，不纳入版本控制。
+
 ## License
 
 MIT
