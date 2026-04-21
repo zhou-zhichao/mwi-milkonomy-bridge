@@ -896,6 +896,42 @@ read_my_listings() {
         fi
     done
 
+    # 等 My Listings 数据加载 (fresh slot 进入后 WebSocket 同步需要时间)
+    # 条件: counter 显示 "X / Y"(X 可以是 0, 但必须出现, 代表已加载)
+    # 最多等 12 秒
+    local wait_left=12
+    while (( wait_left > 0 )); do
+        local has_data
+        has_data=$("$AB" --cdp "$CDP_PORT" eval --stdin <<'PROBEEOF' 2>/dev/null || echo "no"
+(function(){
+  var counter = Array.from(document.querySelectorAll('div')).find(function(d){
+    return typeof d.className === 'string' && d.className.indexOf('MarketplacePanel_listingCount') >= 0;
+  });
+  // counter 存在 && 包含 "Listings" 文字就算已渲染
+  if (!counter) return 'no';
+  if (!/\d+\s*\/\s*\d+\s*Listings/.test(counter.textContent)) return 'no';
+  // 再检查: 如果 counter 说 used > 0, 但 tbody 没行, 说明数据还没同步 -> 等
+  var m = counter.textContent.match(/(\d+)\s*\/\s*\d+\s*Listings/);
+  var used = m ? parseInt(m[1]) : 0;
+  var tables = Array.from(document.querySelectorAll('table'));
+  var myTable = tables.find(function(t){
+    var h = (t.querySelector('thead, tr')||{textContent:''}).textContent || '';
+    return h.indexOf('Status') >= 0 && h.indexOf('Progress') >= 0;
+  });
+  var rows = myTable ? myTable.querySelectorAll('tbody tr').length : 0;
+  if (used > 0 && rows === 0) return 'partial';
+  return 'ready';
+})()
+PROBEEOF
+)
+        has_data="${has_data//\"/}"
+        if [[ "$has_data" == "ready" ]]; then
+            break
+        fi
+        sleep 1
+        wait_left=$((wait_left - 1))
+    done
+
     "$AB" --cdp "$CDP_PORT" eval --stdin <<'LISTEOF' 2>/dev/null || echo '{"used":0,"max":23,"collectable":0,"listings":[]}'
 (function(){
   var counter = Array.from(document.querySelectorAll('div')).find(function(d){
