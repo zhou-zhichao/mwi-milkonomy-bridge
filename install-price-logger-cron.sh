@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Install a cron entry to run the price logger every hour (at :40 to avoid
-# colliding with the keep-alive cron at :10).
+# Install a cron entry to run the price logger every hour at :37
+# (non-round minute, offset from keep-alive at :07).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOGGER="$SCRIPT_DIR/mwi-price-logger.py"
 LOG_FILE="$SCRIPT_DIR/logs/mwi-price-logger.log"
 PYTHON_BIN="$(command -v python3)"
-ENTRY="40 * * * * $PYTHON_BIN $LOGGER >> $LOG_FILE 2>&1"
+ENTRY="37 * * * * $PYTHON_BIN $LOGGER >> $LOG_FILE 2>&1"
 
 if [[ ! -x "$LOGGER" && ! -f "$LOGGER" ]]; then
     echo "ERROR: $LOGGER not found" >&2

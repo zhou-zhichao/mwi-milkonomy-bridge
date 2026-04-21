@@ -27,7 +27,7 @@ PROFIT_CALC="$SCRIPT_DIR/mwi-profit-calc-v2.py"
 # 间隔配置 (秒)
 MIN_INTERVAL=$((3 * 3600))   # 最少 3 小时
 MAX_INTERVAL=$((5 * 3600))   # 最多 5 小时
-MAX_RANDOM_DELAY=${MAX_RANDOM_DELAY:-$((30 * 60))} # 启动前随机等待 0~30 分钟, 可通过环境变量覆盖
+MAX_RANDOM_DELAY=${MAX_RANDOM_DELAY:-$((55 * 60))} # 启动前随机等待 0~55 分钟 (配合非整数 cron 分钟, 覆盖整个小时)
 
 # 自动卖出配置
 SELL_RESERVE=${SELL_RESERVE:-50000000}   # 保留 50M 货值, 超出部分卖出
