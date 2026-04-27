@@ -471,7 +471,8 @@ NAVEOF
         log "  ✗ 找不到搜索框"
         return 1
     fi
-    "$AB" --cdp "$CDP_PORT" fill "@$filter_ref" "$item_name" 2>/dev/null || true
+    # React 兼容搜索: native setter + input event (fill 可能不触发 React 过滤更新)
+    "$AB" --cdp "$CDP_PORT" eval -b "$(printf '%s' '(function(){var b64="'"$b64"'";var name=atob(b64);var input=document.querySelector("input[type=search][placeholder*=Filter]");if(!input)return "NO_INPUT";input.focus();var s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,"value").set;s.call(input,"");input.dispatchEvent(new Event("input",{bubbles:true}));s.call(input,name);input.dispatchEvent(new Event("input",{bubbles:true}));input.dispatchEvent(new Event("change",{bubbles:true}));return "OK";})()' | base64 -w0)" 2>/dev/null || true
     human_sleep 1 2
 
     # 3. 点击匹配的物品 (通过 aria-label 精确匹配)
@@ -602,7 +603,8 @@ NAVEOF
         log "  ✗ 找不到搜索框"
         return 1
     fi
-    "$AB" --cdp "$CDP_PORT" fill "@$filter_ref" "$item_name" 2>/dev/null || true
+    # React 兼容搜索: native setter + input event (fill 可能不触发 React 过滤更新)
+    "$AB" --cdp "$CDP_PORT" eval -b "$(printf '%s' '(function(){var b64="'"$b64"'";var name=atob(b64);var input=document.querySelector("input[type=search][placeholder*=Filter]");if(!input)return "NO_INPUT";input.focus();var s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,"value").set;s.call(input,"");input.dispatchEvent(new Event("input",{bubbles:true}));s.call(input,name);input.dispatchEvent(new Event("input",{bubbles:true}));input.dispatchEvent(new Event("change",{bubbles:true}));return "OK";})()' | base64 -w0)" 2>/dev/null || true
     human_sleep 1 2
 
     # 3. 点击匹配的物品 (只点 Marketplace 面板里的, 不点 Inventory/Header)
@@ -799,7 +801,8 @@ open_item_in_marketplace() {
         log "    ✗ 找不到搜索框"
         return 1
     fi
-    "$AB" --cdp "$CDP_PORT" fill "@$filter_ref" "$item_name" 2>/dev/null || true
+    # React 兼容搜索: 先清空再填入, native setter + input event 确保过滤更新
+    "$AB" --cdp "$CDP_PORT" eval -b "$(printf '%s' '(function(){var b64="'"$b64"'";var name=atob(b64);var input=document.querySelector("input[type=search][placeholder*=Filter]");if(!input)return "NO_INPUT";input.focus();var s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,"value").set;s.call(input,"");input.dispatchEvent(new Event("input",{bubbles:true}));s.call(input,name);input.dispatchEvent(new Event("input",{bubbles:true}));input.dispatchEvent(new Event("change",{bubbles:true}));return "OK";})()' | base64 -w0)" 2>/dev/null || true
     human_sleep 1 2
 
     # 点击物品卡片 (限定在 MarketplacePanel 内, 重试 3 次应对搜索结果延迟渲染)
